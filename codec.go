@@ -193,6 +193,40 @@ func UnmarshalPacked(data []byte) (*Message, error) {
 	return Unmarshal(data)
 }
 
+// UnmarshalZeroTo re-uses both the caller’s header scratch buffer
+// and a pre-allocated *Message.  No heap allocations beyond
+// those slices’ backing arrays ever happen.
+func UnmarshalZeroTo(msg *Message, hdrScratch *[]byte, data []byte) error {
+	// 1) must have at least one word for the header
+	if len(data) == 0 {
+		return io.EOF
+	}
+	if len(data) < int(wordSize) {
+		return errors.New("unmarshal zero: short header section")
+	}
+
+	// 2) figure out how big the header is
+	maxSeg := SegmentID(binary.LittleEndian.Uint32(data[:4]))
+	hdrSize := streamHeaderSize(maxSeg)
+	if uint64(len(data)) < hdrSize {
+		return errors.New("unmarshal zero: short header section")
+	}
+
+	// 3) zero-copy into the scratch: just re-slice data
+	*hdrScratch = data[:hdrSize:hdrSize]
+
+	// 4) demux in place
+	payload := data[hdrSize:]
+	arena := MultiSegment(nil)
+	if err := arena.demux(streamHeader(*hdrScratch), payload, nil); err != nil {
+		return exc.WrapError("unmarshal zero", err)
+	}
+
+	// 5) reset existing Message to point at the new arena
+	msg.Reset(arena)
+	return nil
+}
+
 // MustUnmarshalRoot reads an unpacked serialized stream and returns
 // its root pointer.  If there is any error, it panics.
 func MustUnmarshalRoot(data []byte) Ptr {

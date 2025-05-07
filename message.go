@@ -134,6 +134,43 @@ func (m *Message) Reset(arena Arena) (first *Segment, err error) {
 	return
 }
 
+// ResetNoAlloc rebuilds this Message around a fresh arena
+// but without growing any internal slices or allocating.
+func (m *Message) ResetNoAlloc(arena Arena) {
+	// 1) clear out any capabilities from the last message
+	m.capTable.Reset()
+
+	// 2) release the old arena so buffers can be reused
+	if m.Arena != nil {
+		m.Arena.Release()
+	}
+
+	// 3) reset the read-limit once only initializer
+	m.rlimitInit = sync.Once{}
+	// we don't need to store anything into m.rlimit here; the first
+	// canRead will call initReadLimit to pick up m.TraverseLimit
+
+	// 4) remember the user’s configured limits
+	tl := m.TraverseLimit
+	dl := m.DepthLimit
+
+	// 5) reassign the struct in one shot, preserving only
+	//    • the new arena,
+	//    • the user’s traverse+depth limits,
+	//    • and the now-empty capTable.
+	*m = Message{
+		Arena:         arena,
+		TraverseLimit: tl,
+		DepthLimit:    dl,
+		capTable:      m.capTable,
+	}
+
+	// 6) bind segment 0 into this Message.  Because our
+	//    arena came from demux (it already has all its segments),
+	//    Segment(0) will not allocate, it will just set seg.msg = m.
+	_, _ = m.Segment(0)
+}
+
 func (m *Message) initReadLimit() {
 	if m.TraverseLimit == 0 {
 		m.rlimit.Store(defaultTraverseLimit)
