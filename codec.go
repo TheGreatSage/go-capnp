@@ -193,6 +193,61 @@ func UnmarshalPacked(data []byte) (*Message, error) {
 	return Unmarshal(data)
 }
 
+// UnmarshalPackedZeroTo unpacks `packedData` into your reusable unpack buffer,
+// then does a zero‐copy header demux into your reusable hdrScratch, and finally
+// ResetNoAlloc’s your msg to point at the new arena.  No new heap allocations
+// beyond your two backing arrays.
+//
+//	var hdrScratch   []byte
+//	var unpackScratch []byte
+//	var msg *capnp.Message // pre-allocated once
+//
+// Each call will do:
+//
+//	unpackScratch = unpackScratch[:0]
+//	hdrScratch    = hdrScratch[:0]         // not strictly needed but keeps it clear
+//	err := UnmarshalPackedZeroTo(msg, &hdrScratch, &unpackScratch, packedData)
+func UnmarshalPackedZeroTo(
+	msg *Message,
+	hdrScratch *[]byte,
+	unpackScratch *[]byte,
+	packedData []byte,
+) error {
+	// 1) Unpack into your scratch, re-using its backing array.
+	*unpackScratch = (*unpackScratch)[:0]
+	out, err := packed.Unpack(*unpackScratch, packedData)
+	if err != nil {
+		return exc.WrapError("unmarshalPackedZero: unpack", err)
+	}
+	*unpackScratch = out
+
+	// 2) Delegate to UnmarshalZeroTo logic: zero-copy header, in-place demux, ResetNoAlloc
+	return func() error {
+		data := out
+		// must have at least one word
+		if len(data) < int(wordSize) {
+			return errors.New("unmarshalPackedZero: short header")
+		}
+		// figure header size
+		maxSeg := SegmentID(binary.LittleEndian.Uint32(data[:4]))
+		hdrSize := streamHeaderSize(maxSeg)
+		if uint64(len(data)) < hdrSize {
+			return errors.New("unmarshalPackedZero: short header")
+		}
+		// zero-copy header slice
+		*hdrScratch = data[:hdrSize:hdrSize]
+		// demux payload
+		payload := data[hdrSize:]
+		arena := MultiSegment(nil)
+		if err := arena.demux(streamHeader(*hdrScratch), payload, nil); err != nil {
+			return exc.WrapError("unmarshalPackedZero: demux", err)
+		}
+		// reset your pre-allocated Message without allocations
+		msg.ResetNoAlloc(arena)
+		return nil
+	}()
+}
+
 // UnmarshalZeroTo re-uses both the caller’s header scratch buffer
 // and a pre-allocated *Message.  No heap allocations beyond
 // those slices’ backing arrays ever happen.

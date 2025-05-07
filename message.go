@@ -398,6 +398,87 @@ func (m *Message) MarshalPacked() ([]byte, error) {
 	return buf, nil
 }
 
+// In message.go (or zero.go)
+
+// MarshalTo appends the on‐the‐wire framing (header + segments) to dst,
+// growing dst only if cap(dst) is too small.  No heap allocs if you
+// keep passing in a dst with enough capacity.
+func (m *Message) MarshalTo(dst []byte) ([]byte, error) {
+	// 1) how many segments?
+	nsegs := m.NumSegments()
+	if nsegs == 0 {
+		return dst, errors.New("marshal: message has no segments")
+	}
+	// 2) compute header size and total data size
+	maxSeg := SegmentID(nsegs - 1)
+	hdrSize := streamHeaderSize(maxSeg)
+
+	var dataSize uint64
+	for i := int64(0); i < nsegs; i++ {
+		seg, err := m.Segment(SegmentID(i))
+		if err != nil {
+			return dst, err
+		}
+		dataSize += uint64(len(seg.data))
+	}
+	total := hdrSize + dataSize
+
+	// 3) ensure capacity
+	need := len(dst) + int(total)
+	if cap(dst) < need {
+		newBuf := make([]byte, len(dst), need)
+		copy(newBuf, dst)
+		dst = newBuf
+	}
+
+	// 4) extend slice and write header
+	start := len(dst)
+	dst = dst[:start+int(hdrSize)]
+	binary.LittleEndian.PutUint32(dst[start:], uint32(maxSeg))
+	for i := int64(0); i < nsegs; i++ {
+		off := start + 4 + int(i)*4
+		seg, _ := m.Segment(SegmentID(i)) // already validated
+		words := uint32(len(seg.data) / int(wordSize))
+		binary.LittleEndian.PutUint32(dst[off:], words)
+	}
+
+	// 5) append segment data
+	for i := int64(0); i < nsegs; i++ {
+		seg, _ := m.Segment(SegmentID(i))
+		dst = append(dst, seg.data...)
+	}
+
+	return dst, nil
+}
+
+// MarshalPackedTo does framing + packing in one go, reusing two buffers:
+//
+//	frameBuf := make([]byte, 0, cap1)     // capacity ≥ max un-packed size
+//	packBuf  := make([]byte, 0, cap2)     // capacity ≥ max packed size
+//	packBuf, err = msg.MarshalPackedTo(frameBuf, packBuf)
+func (m *Message) MarshalPackedTo(frameBuf, packBuf []byte) ([]byte, error) {
+	// 1) Reset both slices to zero length so we start fresh.
+	frameBuf = frameBuf[:0]
+	packBuf = packBuf[:0]
+
+	// 2) Build the un-packed framing into frameBuf
+	var err error
+	frameBuf, err = m.MarshalTo(frameBuf)
+	if err != nil {
+		return packBuf, err
+	}
+
+	// // 3) Sanity check: must be 8-aligned
+	// if len(frameBuf)%int(wordSize) != 0 {
+	// 	return packBuf, fmt.Errorf(
+	// 		"MarshalPackedTo: framing length %d not multiple of %d", len(frameBuf), wordSize)
+	// }
+
+	// 4) Pack into packBuf
+	packBuf = packed.Pack(packBuf, frameBuf)
+	return packBuf, nil
+}
+
 type writeCounter struct {
 	N int64
 	io.Writer
