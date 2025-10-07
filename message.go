@@ -451,6 +451,58 @@ func (m *Message) MarshalTo(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// MarshalThree
+// A test of making A faster MarshalTo
+// Re-ususes dst buffer.
+func (m *Message) MarshalThree(dst []byte) ([]byte, error) {
+	// 1) how many segments?
+	nsegs := m.NumSegments()
+	if nsegs == 0 {
+		return dst, errors.New("marshal: message has no segments")
+	}
+	// 2) compute header size and total data size
+	hdrSize := int(streamHeaderSize(SegmentID(nsegs - 1)))
+
+	// This is int now, is that an issue?
+	var dataSize int
+	// I tried i := range nsegs and it didn't seem to be worth it.
+	for i := int64(0); i < nsegs; i++ {
+		seg, err := m.Segment(SegmentID(i))
+		if err != nil {
+			return dst, err
+		}
+		dataSize += len(seg.data)
+	}
+	total := hdrSize + dataSize
+
+	// 3) ensure buf len
+	// This might be unsafe, no idea why normal uses cap MarshalTo
+	if len(dst) < total {
+		newBuf := make([]byte, len(dst), total)
+		copy(newBuf, dst)
+		dst = newBuf
+	}
+
+	off := hdrSize
+	ln := 0
+	// 4) extend slice and write header
+	// This might be bad
+	binary.LittleEndian.PutUint32(dst[0:4], uint32(nsegs-1))
+	for i := int64(0); i < nsegs; i++ {
+		seg, _ := m.Segment(SegmentID(i)) // already validated
+		binary.LittleEndian.PutUint32(
+			dst[int((i+1)*4):int((i+2)*4)],
+			uint32(len(seg.Data())/int(wordSize)),
+		)
+		// This is the changed stuff.
+		// Is this safe? Idk.
+		ln = copy(dst[off:off+ln], seg.data)
+		off += ln
+	}
+
+	return dst, nil
+}
+
 // MarshalPackedTo does framing + packing in one go, reusing two buffers:
 //
 //	frameBuf := make([]byte, 0, cap1)     // capacity ≥ max un-packed size
